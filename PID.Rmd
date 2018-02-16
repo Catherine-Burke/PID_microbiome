@@ -17,6 +17,7 @@ library("reshape2")
 library("tidyverse")
 library("dplyr")
 library("philentropy")
+library("heatmaply")
 
 ```
 ```{r load data into phyloseq}
@@ -26,8 +27,8 @@ tree<-read_tree("data/rep_set.tre")
 tax<- read.table("data/PID_taxtable.txt", header=TRUE, sep="\t", row.names=1)
 tax<-as.matrix(tax)
 tax<-tax_table(tax)
-PID<-import_biom(biom, treefilename=tree)
 PID_map<-sample_data(map)
+PID<-import_biom(biom, treefilename=tree)
 PID<-merge_phyloseq(PID,PID_map,tax)
 tax_table(PID)<-tax_table(PID)[,8:15]
 #The last two columns in the tax table are the STIRRUPS classifications, the others are the RDP classficiations
@@ -48,7 +49,11 @@ mycol <- palette(c("#e6194b","#3cb44b","#ffe119","#0082c8","#f58231","#911eb4","
 #Convert counts to relative abundance
 PID_fil_rel<-transform_sample_counts(PID_fil, function(x) x/sum(x))
 #Need to merge OTUs with the same species assignment.  Because the RDP tax strings don't always match at the higher levels for the STIRRUPs assignments, need to remove other columns from tax table for the merging to occur properly.
-PID_merge<-PID_fil_rare
+PID_merge_count<-PID_fil
+tax_table(PID_merge_count)<-tax_table(PID_merge_count)[,c(1,8)]
+PID_merge_count<-tax_glom(PID_merge_count, taxrank="s_Genus_s_Species")
+
+PID_merge<-PID_fil_rel
 tax_table(PID_merge)<-tax_table(PID_merge)[,c(1,8)]
 PID_merge<-tax_glom(PID_merge, taxrank="s_Genus_s_Species")
 PID_merge
@@ -68,12 +73,13 @@ plot_heatmap(PID_rel_t20, method="MDS", distance="jsd",sample.label="disease_sta
 #Base R heatmap with default dist and clustering
 heatmap(otu_table(PID_fil_t20), labRow=(data.frame(tax_table(PID_fil_t20))$s_Genus_s_Species), labCol=sample_data(PID_fil_t20)$disease_status)
 #Hierarchical clustering
-otu<-otu_table(PID_fil_t20)
-data.frame(tax_table(PID_fil_t20))$s_Genus_s_Species
-js_d<-phyloseq::distance(PID_fil_t20, method="jsd", TRUE)
+otu<-otu_table(PID_rel_t20)
+row.names(otu)<-data.frame(tax_table(PID_rel_t20))$s_Genus_s_Species
+js_d<-phyloseq::distance(PID_rel_t20, method="jsd", TRUE)
 hc<-hclust(js_d, method="ward.D")
-heatmaply(otu, Colv=hc, labRow=data.frame(tax_table(PID_fil_t20))$s_Genus_s_Species,
-          seriate="mean")
+heatmaply(otu, Colv=hc,
+          seriate="mean", col_side_colors=data.frame(sample_data(PID_fil_t20)[,c(2,5,7)]), fontsize_row = 6, fontsize_col = 6,
+          plot_method="ggplot")
 
 
 d<-JSD(data.frame(otus), est.prob="empirical")
@@ -90,16 +96,67 @@ plot(hc2)
 #Taxa summaries
 
 ```{r}
-PID_smelt<-psmelt(PID_fil)
-PID_smelt<- PID_smelt %>% group_by(sample_name) %>% mutate(rel_abund=Abundance/sum(Abundance))
+PID_smelt<-psmelt(PID_merge)
+PID_smelt<- PID_smelt %>% group_by(sample_name) %>% mutate(perc_abund=Abundance/sum(Abundance)*100)
 
 PID_smelt %>% filter(disease_status %in% c("Case","Control")) %>%
-  filter(rel_abund>0.03)%>%
-  ggplot(aes(x=sample_name, y=rel_abund, fill=s_Species))+
+  filter(Abundance>0.05)%>%
+  ggplot(aes(x=sample_name, y=rel_abund, fill=s_Genus_s_Species))+
   geom_bar(stat="identity") +
   facet_grid(.~disease_status, scales="free")+
   scale_fill_manual(values = mycol)
 
+#Community state type II has no Lactobacillus inners - looking at the controls now to examine this further.
 
+#Look at number of seqs for cst samples
+PID_smelt %>% filter(sample_type=="cst_control") %>% group_by(sample_name) %>% summarise (sum=sum(Abundance))
+
+#Check Lactobacillus OTUs in CSTII
+PID_smelt %>% filter(sample_name=="CST2C") %>% filter(Genus=="g__Lactobacillus") %>% select(OTU,Abundance, rel_abund,Genus,Species,s_Genus_s_Species) %>% arrange
+
+#Export OTU table from tax_glom for use in correlation analysis in QIIME.
+#Check that rows are in the same order for tax and otu tables
+t1<-row.names(otu_table(PID_merge_count))
+t2<-row.names(tax_table(PID_merge_count))
+identical(t1,t2)
+glom_otus<-data.frame(otu_table(PID_merge_count))
+row.names(glom_otus)<-data.frame(tax_table(PID_merge_count))$s_Genus_s_Species
+write.table(glom_otus, file="glom_otu.txt", sep="\t",quote=FALSE)
+#Had to make a few changes to the txt file to make it suitable for conversion to biom table and qiime use.  Add #OTUId as first column header, change underscores in speceis names to .
+sort(sample_names(PID_merge_count))
+#Prevotella has a non-significant increase in PID.  Plot and take a look
+PID_smelt %>% filter(s_Genus_s_Species=="Prevotella_melaninogenica_cluster") %>%
+  filter(sample_type=="patient") %>%
+  ggplot(aes(x=Sample, y=perc_abund))+geom_bar(stat="identity")+
+  facet_grid(.~disease_status, scales="free", space="free")+labs(title="Prevotella melaninogenica cluster relative abundance", x=NULL, y="Relative abundance (%)") + theme(axis.text.x = element_text(angle = 90))
+
+PID_smelt %>% filter(s_Genus_s_Species=="Lactobacillus_crispatus_cluster") %>%
+  filter(sample_type=="patient") %>%
+  ggplot(aes(x=Sample, y=perc_abund))+geom_bar(stat="identity")+
+  facet_grid(.~disease_status, scales="free", space="free")+labs(title="Lactobacillus_crispatus_cluster relative abundance", x=NULL, y="Relative abundance (%)") + theme(axis.text.x = element_text(angle = 90))
+
+PID_smelt %>% filter(s_Genus_s_Species %in% c("Lachnospiraceae_BVAB1", "Megasphaera_micronuciformis","Eggerthella_sinensis","Aerococcus_christensenii","Atopobium_vaginae","Parvimonas_micra","Prevotella_cluster2","Dialister_micraerophilus","Sneathia_amnii")) %>%
+  filter(sample_type=="patient") %>%
+  filter(!is.na(pos_chlamydia)) %>%
+  ggplot(aes(x=Sample, y=perc_abund, fill=s_Genus_s_Species))+
+  geom_bar(stat="identity")+
+  facet_grid(.~pos_chlamydia, scales="free", space="free")+
+  labs(x=NULL, y="Relative abundance (%)") + 
+  theme(axis.text.x = element_text(angle = 90))
+
+PID_smelt_full<-psmelt(PID_fil_rare)
+PID_smelt_full<- PID_smelt_full %>% group_by(sample_name) %>% mutate(rel_abund=Abundance/sum(Abundance))
+PID_smelt_full %>% filter(Genus=="g__Prevotella") %>%
+  filter(sample_type=="patient") %>%
+  ggplot(aes(x=Sample, y=Abundance))+geom_bar(stat="identity")+
+  facet_grid(cst~disease_status, scales="free")+labs(x=NULL, y="Relative abundance (%)") + theme(axis.text.x = element_text(angle = 90))
+
+```
+#Beta-div
+```{r}
+PID_merge_pat<-subset_samples(PID_merge, sample_type=="patient")
+dist<-phyloseq::distance(PID_merge_pat, "jsd")
+dist_ord<-ordinate(PID_merge_pat, method="PCoA", distanct=dist)
+plot_ordination(PID_merge_pat,dist_ord, color="disease_status", shape="cst")
 ```
 
