@@ -1,0 +1,105 @@
+---
+title: "PID_preliminary_data"
+author: "Cath Burke"
+date: "14 February 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r load pacakages}
+library("phyloseq")
+library("ggplot2")
+library("vegan")
+library("reshape2")
+library("tidyverse")
+library("dplyr")
+library("philentropy")
+
+```
+```{r load data into phyloseq}
+biom<-"data/otu_table_mc2_w_tax_no_pynast_failures_json.biom"
+map<-read.table("data/PID_map.txt", header=TRUE, stringsAsFactors=TRUE, sep="\t", row.names=1)
+tree<-read_tree("data/rep_set.tre")
+tax<- read.table("data/PID_taxtable.txt", header=TRUE, sep="\t", row.names=1)
+tax<-as.matrix(tax)
+tax<-tax_table(tax)
+PID<-import_biom(biom, treefilename=tree)
+PID_map<-sample_data(map)
+PID<-merge_phyloseq(PID,PID_map,tax)
+tax_table(PID)<-tax_table(PID)[,8:15]
+#The last two columns in the tax table are the STIRRUPS classifications, the others are the RDP classficiations
+#Remove samples with less than 2K seqs
+PID_fil<-prune_samples(sample_sums(PID) > 2000, PID)
+PID_fil<-filter_taxa(PID_fil, function(x) sum(x)>9, TRUE)
+PID_fil_rare<-rarefy_even_depth(PID_fil, 2000, rngseed=711, replace=FALSE, trimOTUs=TRUE)
+#Set colour pallette
+mycol <- palette(c("#e6194b","#3cb44b","#ffe119","#0082c8","#f58231","#911eb4","#46f0f0","#f032e6","#d2f53c","#fabebe","#008080","#e6beff","#aa6e28","#fffac8","#800000","#aaffc3","#808000","#ffd8b1","#000080","#808080","#FFFFFF","#000000"))
+mycol <- palette(c("#e6194b","#3cb44b","#ffe119","#0082c8","#f58231","#911eb4","#46f0f0","#f032e6","#d2f53c","#fabebe","#008080","#e6beff","#aa6e28","#fffac8","#800000","#aaffc3","#808000","#ffd8b1","#000080","#808080","#FFFFFF","#000000"))
+
+```
+#Cluster into community state types
+
+```{r pressure, echo=FALSE}
+
+
+#Convert counts to relative abundance
+PID_fil_rel<-transform_sample_counts(PID_fil, function(x) x/sum(x))
+#Need to merge OTUs with the same species assignment.  Because the RDP tax strings don't always match at the higher levels for the STIRRUPs assignments, need to remove other columns from tax table for the merging to occur properly.
+PID_merge<-PID_fil_rare
+tax_table(PID_merge)<-tax_table(PID_merge)[,c(1,8)]
+PID_merge<-tax_glom(PID_merge, taxrank="s_Genus_s_Species")
+PID_merge
+PID_merge_samples<-subset_samples(PID_merge, sample_type %in% c("patient","cst_control"))
+#Top20
+Top20OTUs = names(sort(taxa_sums(PID_merge_samples), TRUE)[1:20])
+PID_fil_t20<-prune_taxa(Top20OTUs,PID_merge_samples)
+#First replace 0 with 1 in otu_table
+otus<-otu_table(PID_fil_t20)
+otus[otus==0]<-1
+PID_log<-PID_fil_t20
+otu_table(PID_log)[otu_table(PID_log)==0]<-1
+#phyloseq heat map ordered by ordination rather than clustering
+PID_rel_t20<-transform_sample_counts(PID_merge_samples, function(x) x/sum(x))
+PID_rel_t20<-prune_taxa(Top20OTUs,PID_rel_t20)
+plot_heatmap(PID_rel_t20, method="MDS", distance="jsd",sample.label="disease_status", taxa.label="s_Genus_s_Species", taxa.order="s_Genus_s_Species", trans=log_trans(2),low="#66CCFF", high="#000033",na.value="white")
+#Base R heatmap with default dist and clustering
+heatmap(otu_table(PID_fil_t20), labRow=(data.frame(tax_table(PID_fil_t20))$s_Genus_s_Species), labCol=sample_data(PID_fil_t20)$disease_status)
+#Hierarchical clustering
+otu<-otu_table(PID_fil_t20)
+data.frame(tax_table(PID_fil_t20))$s_Genus_s_Species
+js_d<-phyloseq::distance(PID_fil_t20, method="jsd", TRUE)
+hc<-hclust(js_d, method="ward.D")
+heatmaply(otu, Colv=hc, labRow=data.frame(tax_table(PID_fil_t20))$s_Genus_s_Species,
+          seriate="mean")
+
+
+d<-JSD(data.frame(otus), est.prob="empirical")
+heatmap(d)
+
+phyloseq::JSD(PID_fil_t20)
+#Produces a distance matrix between OTUs rather than samples.
+hc<-hclust(as.dist(d), method="ward.D")
+hc2<-hclust(data.frame(otus), method="ward.D")
+plot(hc2)
+
+```
+
+#Taxa summaries
+
+```{r}
+PID_smelt<-psmelt(PID_fil)
+PID_smelt<- PID_smelt %>% group_by(sample_name) %>% mutate(rel_abund=Abundance/sum(Abundance))
+
+PID_smelt %>% filter(disease_status %in% c("Case","Control")) %>%
+  filter(rel_abund>0.03)%>%
+  ggplot(aes(x=sample_name, y=rel_abund, fill=s_Species))+
+  geom_bar(stat="identity") +
+  facet_grid(.~disease_status, scales="free")+
+  scale_fill_manual(values = mycol)
+
+
+```
+
